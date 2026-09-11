@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+@theme {
+  --color-slate-sea: #2C3E50;
+  --color-rockpool: #1A6B5A;
+  --color-sand: #F5F0E8;
+  --color-driftwood: #B8A99A;
+  --color-sunset: #D4764E;
+
+  --font-sans: "DM Sans", system-ui, sans-serif;
+  --font-serif: "DM Serif Display", Georgia, serif;
+  --font-handwriting: "Caveat", cursive;
+
+  --max-width-content: 1400px;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-sand text-slate-sea font-sans;
+  }
+
+  ::selection {
+    @apply bg-rockpool/20 text-slate-sea;
+  }
+}
+
+@layer components {
+  .section-container {
+    @apply mx-auto max-w-content px-5 md:px-8;
+  }
+}
+
+@keyframes slow-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(6px); }
+}
+
+@keyframes scroll-dot {
+  0% { opacity: 1; transform: translateY(0); }
+  50% { opacity: 0.3; transform: translateY(6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.animate-slow-bounce {
+  animation: slow-bounce 2s ease-in-out infinite;
+}
+
+.animate-scroll-dot {
+  animation: scroll-dot 1.5s ease-in-out infinite;
+}
