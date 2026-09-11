@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fetch Google Places photos for trearddurbay_places that don't yet have a photo_url.
+Fetch Google Places photos for rhosneigr_places that don't yet have a photo_url.
 Saves images to public/images/listings/{slug}.jpg and updates Supabase.
 """
 
@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import logging
+import re
 from pathlib import Path
 
 import requests
@@ -19,14 +20,16 @@ from supabase import create_client
 load_dotenv(os.path.expanduser("~/.env"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("fetch_listing_photos")
+logger = logging.getLogger("fetch_rhosneigr_photos")
 
 API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY")
 PLACES_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+PLACES_DETAIL_URL = "https://places.googleapis.com/v1/places/{place_id}"
 PHOTOS_URL = "https://places.googleapis.com/v1/{photoResource}/media"
 
 MAX_WIDTH = 600
 IMAGES_DIR = Path(__file__).parent.parent / "public" / "images" / "listings"
+TABLE_NAME = "rhosneigr_places"
 
 WALES_BBOX = {
     "low": {"latitude": 53.0, "longitude": -5.5},
@@ -38,7 +41,6 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
 
 def search_place(query: str) -> dict | None:
-    """Text search for a place, returning the first result with its photos."""
     headers = {
         "X-Goog-Api-Key": API_KEY,
         "X-Goog-FieldMask": "places.id,places.name,places.photos",
@@ -67,8 +69,29 @@ def search_place(query: str) -> dict | None:
         return None
 
 
+def get_place_photos(place_id: str) -> list:
+    """Get photos for a place by its ID."""
+    headers = {
+        "X-Goog-Api-Key": API_KEY,
+        "X-Goog-FieldMask": "places.photos",
+        "Content-Type": "application/json",
+    }
+    url = PLACES_DETAIL_URL.format(place_id=place_id)
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        if resp.status_code == 429:
+            logger.warning("Rate limited on detail — backing off 3s")
+            time.sleep(3)
+            resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("photos", [])
+    except requests.exceptions.RequestException as exc:
+        logger.error("Detail error for '%s': %s", place_id, exc)
+        return []
+
+
 def download_photo(photo_resource: str) -> bytes | None:
-    """Download a photo from the Place Photos API."""
     url = PHOTOS_URL.format(photoResource=photo_resource)
     params = {"maxWidthPx": MAX_WIDTH, "key": API_KEY}
     try:
@@ -85,7 +108,6 @@ def download_photo(photo_resource: str) -> bytes | None:
 
 
 def resize_and_save(image_bytes: bytes, output_path: Path) -> None:
-    """Resize image to max 600px wide and save as JPEG."""
     img = Image.open(BytesIO(image_bytes))
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
@@ -94,92 +116,84 @@ def resize_and_save(image_bytes: bytes, output_path: Path) -> None:
         new_height = int(height * MAX_WIDTH / width)
         img = img.resize((MAX_WIDTH, new_height), Image.LANCZOS)
     img.save(output_path, "JPEG", quality=82, optimize=True)
-    logger.info("  Saved: %s (%dx%d)", output_path.name, *img.size)
+    logger.info("Saved: %s (%dx%d)", output_path.name, *img.size)
+
+
+def generate_slug(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug
 
 
 def main() -> None:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        logger.error("SUPABASE_URL / SUPABASE_SERVICE_KEY not set in ~/.env")
+        sys.exit(1)
     if not API_KEY:
         logger.error("GOOGLE_PLACES_API_KEY not set in ~/.env")
         sys.exit(1)
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        logger.error("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in ~/.env")
-        sys.exit(1)
+
+    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+    # Fetch listings that don't yet have a photo_url
+    resp = sb.table(TABLE_NAME).select("id, place_id, name, slug, photo_url").is_("photo_url", "null").execute()
+    listings = resp.data
+    logger.info("Found %d listings without photos", len(listings))
 
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info("Output directory: %s", IMAGES_DIR)
 
-    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    for listing in listings:
+        place_id = listing.get("place_id")
+        name = listing["name"]
+        slug = listing["slug"]
+        listing_id = listing["id"]
 
-    logger.info("Fetching places without photo_url...")
-    response = supabase.table("trearddurbay_places").select(
-        "id, name, slug, photo_url"
-    ).is_("photo_url", None).execute()
-    places = response.data
-    logger.info("Found %d places needing photos", len(places))
+        if not place_id:
+            logger.warning("No place_id for '%s' — skipping", name)
+            continue
 
-    if not places:
-        logger.info("No places need photos — all done.")
-        return
+        logger.info("Fetching photos for: %s (place_id=%s)", name, place_id)
 
-    success = 0
-    failed = 0
-    skipped = 0
+        # Get photos from place detail
+        photos = get_place_photos(place_id)
+        if not photos:
+            # Fallback to text search
+            logger.info("  No detail photos — trying text search...")
+            place = search_place(f"{name} Rhosneigr")
+            if place:
+                photos = place.get("photos", [])
 
-    for place in places:
-        place_id = place["id"]
-        name = place["name"]
-        slug = place["slug"]
+        if not photos:
+            logger.warning("  No photos found for '%s'", name)
+            time.sleep(1.5)
+            continue
 
-        logger.info("%s (%s)...", name, slug)
+        photo_resource = photos[0].get("name")
+        if not photo_resource:
+            logger.warning("  Photo has no name for '%s'", name)
+            time.sleep(1.5)
+            continue
 
-        # Try multiple query variations
-        queries = [
-            f"{name} Trearddur Bay Anglesey",
-            f"{name} Anglesey",
-            name,
-        ]
-
-        photo_bytes = None
-        for query in queries:
-            place_data = search_place(query)
-            if not place_data:
-                continue
-            photos = place_data.get("photos", [])
-            if not photos:
-                continue
-            photo_resource = photos[0].get("name")
-            if not photo_resource:
-                continue
-            photo_bytes = download_photo(photo_resource)
-            if photo_bytes:
-                break
-            time.sleep(0.3)
-
-        if not photo_bytes:
-            logger.warning("  FAILED — no photo found for '%s'", name)
-            failed += 1
-            time.sleep(0.3)
+        image_bytes = download_photo(photo_resource)
+        if not image_bytes:
+            logger.warning("  Failed to download photo for '%s'", name)
+            time.sleep(1.5)
             continue
 
         output_path = IMAGES_DIR / f"{slug}.jpg"
-        resize_and_save(photo_bytes, output_path)
+        resize_and_save(image_bytes, output_path)
 
+        # Update Supabase with the public URL
         photo_url = f"/images/listings/{slug}.jpg"
-        supabase.table("trearddurbay_places").update(
-            {"photo_url": photo_url}
-        ).eq("id", place_id).execute()
+        update_resp = sb.table(TABLE_NAME).update(
+            {"photo_url": photo_url, "updated_at": "now()"}
+        ).eq("id", listing_id).execute()
 
-        logger.info("  SUCCESS → %s", photo_url)
-        success += 1
-        time.sleep(0.3)
+        if update_resp.data:
+            logger.info("  Updated photo_url for '%s': %s", name, photo_url)
+        else:
+            logger.warning("  Failed to update photo_url for '%s'", name)
 
-    print("\n" + "=" * 50)
-    print(f"{'Result':<20} {'Count':>6}")
-    print("-" * 50)
-    print(f"{'Success':<20} {success:>6}")
-    print(f"{'Failed (no photo)':<20} {failed:>6}")
-    print(f"{'Total':<20} {success + failed:>6}")
-    print("=" * 50)
+        time.sleep(1.5)  # Google rate limit
 
 
 if __name__ == "__main__":

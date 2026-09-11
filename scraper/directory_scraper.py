@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Trearddur Bay Directory Scraper
+Rhosneigr Directory Scraper
 
-Scrapes Google Places API (New) for local businesses in Trearddur Bay, Anglesey
-and upserts results into Supabase.
+Scrapes Google Places API (New) for local businesses in Rhosneigr, Anglesey
+and upserts results into Supabase rhosneigr_places table.
 
 Usage:
   python directory_scraper.py --category eat-and-drink --dry-run --verbose
@@ -15,7 +15,6 @@ import os
 import re
 import sys
 import time
-import json
 import logging
 import argparse
 from datetime import datetime, timezone
@@ -33,58 +32,62 @@ GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY")
 
 PLACES_API_URL = "https://places.googleapis.com/v1/places:searchText"
 
-# Trearddur Bay centre, 3km default radius
-LOCATION = {"latitude": 53.2773, "longitude": -4.6217}
-DEFAULT_RADIUS_M = 3000
+# Rhosneigr village centre, 1.5km radius (compact village — larger radius pulls in Aberffraw or Valley)
+LOCATION = {"latitude": 53.2285, "longitude": -4.5105}
+DEFAULT_RADIUS_M = 1500
+
+TABLE_NAME = "rhosneigr_places"
 
 # Each entry: (query, radius_override_metres or None for default)
 CATEGORIES = {
     "eat-and-drink": [
-        ("restaurants Trearddur Bay", None),
-        ("cafes Trearddur Bay", None),
-        ("pubs Trearddur Bay", None),
-        ("takeaway Trearddur Bay", None),
-        ("cafe Holyhead Anglesey", None),
-        ("restaurant Holyhead Anglesey", None),
-        ("pub Holyhead Anglesey", None),
-        ("coffee shop Trearddur Bay", None),
-        ("fine dining Anglesey", None),
-        ("gastropub Anglesey", None),
+        ("restaurants Rhosneigr", None),
+        ("cafes Rhosneigr", None),
+        ("pubs Rhosneigr", None),
+        ("takeaway Rhosneigr", None),
+        ("cafe Anglesey", 5000),
+        ("restaurant Anglesey", 5000),
+        ("pub Anglesey", 5000),
+        ("coffee shop Rhosneigr", None),
+        ("fish and chips Rhosneigr", None),
+        ("gastropub Anglesey", 5000),
     ],
     "stay": [
-        ("hotels Trearddur Bay", None),
-        ("accommodation Trearddur Bay", None),
-        ("B&B Trearddur Bay", None),
-        ("holiday cottages Trearddur Bay", None),
-        ("caravan park Trearddur Bay", 5000),
-        ("camping Trearddur Bay", 5000),
-        ("caravan park Holyhead Anglesey", 5000),
-        ("campsite Holyhead Anglesey", 5000),
-        ("static caravans Trearddur Bay", 5000),
-        ("hotels Holyhead Anglesey", 5000),
-        ("guest house Trearddur Bay", 5000),
+        ("hotels Rhosneigr", None),
+        ("accommodation Rhosneigr", None),
+        ("B&B Rhosneigr", None),
+        ("holiday cottages Rhosneigr", None),
+        ("caravan park Rhosneigr", 3000),
+        ("camping Rhosneigr", 3000),
+        ("static caravans Rhosneigr", 3000),
+        ("hotels Anglesey", 8000),
+        ("guest house Anglesey", 8000),
+        ("holiday park Anglesey", 8000),
     ],
     "activities": [
-        ("activities Trearddur Bay", None),
-        ("watersports Trearddur Bay", None),
-        ("kayak hire Trearddur Bay", None),
-        ("golf Trearddur Bay", None),
-        ("attractions Holyhead Anglesey", None),
-        ("things to do Anglesey", None),
-        ("tourist attraction Trearddur Bay", None),
-        ("walking trails Anglesey", None),
-        ("diving Anglesey", None),
-        ("boat trips Anglesey", None),
-        ("coasteering Anglesey", None),
+        ("activities Rhosneigr", None),
+        ("watersports Rhosneigr", None),
+        ("surf school Rhosneigr", None),
+        ("kitesurfing Rhosneigr", None),
+        ("kayak hire Rhosneigr", None),
+        ("golf Anglesey", 8000),
+        ("attractions Anglesey", 8000),
+        ("things to do Anglesey", 8000),
+        ("tourist attraction Anglesey", 8000),
+        ("walking trails Anglesey", 8000),
+        ("diving Anglesey", 8000),
+        ("boat trips Anglesey", 8000),
+        ("coasteering Anglesey", 8000),
     ],
     "shops": [
-        ("shops Trearddur Bay", None),
-        ("gift shop Trearddur Bay", None),
-        ("gallery Trearddur Bay", None),
-        ("gift shop Holyhead Anglesey", None),
-        ("farm shop Anglesey", None),
-        ("art gallery Anglesey", None),
-        ("convenience store Trearddur Bay", None),
+        ("shops Rhosneigr", None),
+        ("gift shop Rhosneigr", None),
+        ("gallery Rhosneigr", None),
+        ("gift shop Anglesey", 8000),
+        ("farm shop Anglesey", 8000),
+        ("art gallery Anglesey", 8000),
+        ("convenience store Rhosneigr", None),
+        ("surf shop Rhosneigr", None),
     ],
 }
 
@@ -99,7 +102,7 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
     level = logging.DEBUG if verbose else logging.INFO
     fmt = "%(asctime)s [%(levelname)s] %(message)s"
     logging.basicConfig(level=level, format=fmt)
-    return logging.getLogger("trearddurbay_scraper")
+    return logging.getLogger("rhosneigr_scraper")
 
 
 def generate_slug(name: str, existing_slugs: set[str]) -> str:
@@ -141,7 +144,7 @@ def search_places(
         if resp.status_code == 429:
             logger.warning("Rate limited by Google — backing off 5s")
             time.sleep(5)
-            return search_places(query, api_key, logger)
+            return search_places(query, api_key, logger, radius_metres)
         resp.raise_for_status()
         data = resp.json()
     except httpx.HTTPStatusError as exc:
@@ -157,7 +160,7 @@ def search_places(
 
 
 def normalise_place(place: dict, category: str, existing_slugs: set[str]) -> dict:
-    """Transform a Google Places result into the trearddurbay_places schema."""
+    """Transform a Google Places result into the rhosneigr_places schema."""
     display_name = place.get("displayName", {})
     name = display_name.get("text", "Unknown")
     place_id = place.get("id", "")
@@ -202,7 +205,7 @@ def with_retries(max_attempts: int = 3, initial_backoff: float = 2.0):
                 except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout) as exc:
                     if attempt == max_attempts - 1:
                         raise
-                    _logger = logging.getLogger("trearddurbay_scraper")
+                    _logger = logging.getLogger("rhosneigr_scraper")
                     _logger.warning(
                         "Supabase connection error (attempt %d/%d): %s — retrying in %.1fs",
                         attempt + 1, max_attempts, exc, backoff
@@ -215,13 +218,13 @@ def with_retries(max_attempts: int = 3, initial_backoff: float = 2.0):
 
 @with_retries()
 def get_existing_place_ids(supabase) -> set[str]:
-    resp = supabase.table("trearddurbay_places").select("place_id").execute()
+    resp = supabase.table(TABLE_NAME).select("place_id").execute()
     return {r["place_id"] for r in resp.data if r.get("place_id")}
 
 
 @with_retries()
 def get_existing_slugs(supabase) -> set[str]:
-    resp = supabase.table("trearddurbay_places").select("slug").execute()
+    resp = supabase.table(TABLE_NAME).select("slug").execute()
     return {r["slug"] for r in resp.data if r.get("slug")}
 
 
@@ -233,7 +236,7 @@ def upsert_place(supabase, place: dict, existing_ids: set[str]) -> tuple[str, bo
     """
     is_new = place["place_id"] not in existing_ids
 
-    resp = supabase.table("trearddurbay_places").upsert(
+    resp = supabase.table(TABLE_NAME).upsert(
         place,
         on_conflict="place_id",
         ignore_duplicates=False,
@@ -242,12 +245,12 @@ def upsert_place(supabase, place: dict, existing_ids: set[str]) -> tuple[str, bo
     if resp.data:
         returned_id = resp.data[0].get("id") or resp.data[0].get("place_id")
         if not returned_id:
-            fetch_resp = supabase.table("trearddurbay_places").select("id").eq(
+            fetch_resp = supabase.table(TABLE_NAME).select("id").eq(
                 "place_id", place["place_id"]
             ).execute()
             returned_id = fetch_resp.data[0]["id"] if fetch_resp.data else None
     else:
-        fetch_resp = supabase.table("trearddurbay_places").select("id").eq(
+        fetch_resp = supabase.table(TABLE_NAME).select("id").eq(
             "place_id", place["place_id"]
         ).execute()
         returned_id = fetch_resp.data[0]["id"] if fetch_resp.data else None
@@ -346,7 +349,7 @@ def run(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Trearddur Bay Directory Scraper")
+    parser = argparse.ArgumentParser(description="Rhosneigr Directory Scraper")
     parser.add_argument(
         "--category",
         default="all",
@@ -374,8 +377,9 @@ def main() -> None:
         logger.error("Unknown category: %s. Valid: %s", args.category, list(CATEGORIES.keys()))
         sys.exit(1)
 
-    logger.info("=== Trearddur Bay Directory Scraper started ===")
+    logger.info("=== Rhosneigr Directory Scraper started ===")
     logger.info("Location: %.4f, %.4f  default radius: %dm", LOCATION["latitude"], LOCATION["longitude"], DEFAULT_RADIUS_M)
+    logger.info("Table: %s", TABLE_NAME)
     logger.info("Categories: %s", target_categories)
     logger.info("Mode: DRY RUN" if args.dry_run else "LIVE")
 
